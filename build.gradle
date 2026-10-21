@@ -1,0 +1,50 @@
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+}
+
+group = 'com.peak885'
+version = '0.1.0'
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+    withSourcesJar()
+}
+
+def lwjglVersion = "3.3.4"
+
+dependencies {
+    api "org.joml:joml:1.10.8"
+
+    implementation 'org.anarres:jcpp:1.4.14'
+
+    api "org.lwjgl:lwjgl:${lwjglVersion}"
+    api "org.lwjgl:lwjgl-opengl:${lwjglVersion}"
+    api "org.lwjgl:lwjgl-freetype:${lwjglVersion}"
+
+    compileOnly "org.lwjgl:lwjgl-glfw:${lwjglVersion}"
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+publishing {
+    publications {
+        plugin(MavenPublication) {
+            from components.java
+        }
+    }
+    repositories {
+        maven {
+            name = "GitHub"
+            url = layout.projectDirectory.dir("peaks_maven")
+        }
+    }
+}
