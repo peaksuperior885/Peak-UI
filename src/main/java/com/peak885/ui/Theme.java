@@ -26,7 +26,6 @@ public final class Theme {
     public static final Rgba INVERSE_SURFACE = Rgba.hex(0xE6E0E9);
     public static final Rgba INVERSE_ON_SURFACE = Rgba.hex(0x322F35);
 
-    // Glass / frosted surfaces (semi-transparent, for glassmorphism)
     public static final Rgba GLASS = new Rgba(0.30f, 0.28f, 0.35f, 0.42f);
     public static final Rgba GLASS_LIGHT = new Rgba(0.95f, 0.94f, 0.98f, 0.18f);
     public static final Rgba GLASS_BORDER = new Rgba(1f, 1f, 1f, 0.22f);

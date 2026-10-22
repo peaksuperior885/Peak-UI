@@ -190,8 +190,6 @@ public final class TextRenderer implements AutoCloseable {
         return lineHeight;
     }
 
-    /** Draws with the compatibility-profile fixed-function pipeline. Core-profile Minecraft screens
-     * should supply Ui.TextBackend and use GuiGraphics instead. */
     public void drawText(String text, int x, int y, float r, float g, float b, float a) {
         if (text == null || text.isEmpty()) return;
         ensureAlive();
@@ -512,11 +510,9 @@ public final class TextRenderer implements AutoCloseable {
         try {
             Path fontToUse = null;
 
-            // Check if user specified a font path and if it exists
             if (customFontPath != null && Files.exists(customFontPath)) {
                 fontToUse = customFontPath;
             } else {
-                // Fallback to bundled resource font
                 try (InputStream input = TextRenderer.class.getResourceAsStream(FONT_RESOURCE)) {
                     if (input == null) {
                         throw new IllegalStateException("Missing font resource: " + FONT_RESOURCE);
@@ -539,7 +535,6 @@ public final class TextRenderer implements AutoCloseable {
                         fontToUse.toAbsolutePath().toString(),
                         0, facePointer) != 0) {
 
-                    // If the user-specified font failed to load, gracefully attempt fallback to the bundled resource font
                     if (customFontPath != null && fontToUse.equals(customFontPath)) {
                         try (InputStream input = TextRenderer.class.getResourceAsStream(FONT_RESOURCE)) {
                             if (input != null) {

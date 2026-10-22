@@ -11,7 +11,6 @@ import static org.lwjgl.opengl.GL15.*;
 import static org.lwjgl.opengl.GL20.*;
 import static org.lwjgl.system.MemoryStack.stackPush;
 
-/** Core-profile box renderer using a streamed VBO (no VAO creation required). */
 public final class BoxRenderer implements AutoCloseable {
     private static final int POSITION_ATTRIBUTE = 0;
     private static final int LOCAL_ATTRIBUTE = 1;
@@ -141,7 +140,6 @@ public final class BoxRenderer implements AutoCloseable {
         if (!inBegin) throw new IllegalStateException("drawBox requires begin()/end()");
         if (w <= 0f || h <= 0f) return;
 
-        // Expand geometry so soft outer edge is not clipped by the quad
         float pad = Math.max(0f, softness) + 1f;
         float x0 = x - pad;
         float y0 = y - pad;
@@ -149,13 +147,11 @@ public final class BoxRenderer implements AutoCloseable {
         float y1 = y + h + pad;
         float hx = w * .5f;
         float hy = h * .5f;
-        // Local coords still relative to the logical box center; padded verts are outside
         float lx0 = -hx - pad;
         float ly0 = -hy - pad;
         float lx1 = hx + pad;
         float ly1 = hy + pad;
 
-        // The Y-flipped projection reverses screen-space winding; keep triangles counter-clockwise.
         putVertex(0, x0, y0, lx0, ly0);
         putVertex(1, x1, y1, lx1, ly1);
         putVertex(2, x1, y0, lx1, ly0);
@@ -214,7 +210,6 @@ public final class BoxRenderer implements AutoCloseable {
         closed = true;
     }
 
-    /** Captures the GL state this renderer changes, including the currently bound VAO's attributes. */
     private static final class GlState {
         final int program = glGetInteger(GL_CURRENT_PROGRAM);
         final int arrayBuffer = glGetInteger(GL_ARRAY_BUFFER_BINDING);

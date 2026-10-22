@@ -19,7 +19,7 @@ public final class Box {
     private float borderG;
     private float borderB;
     private float borderA;
-    private float softness; // soft outer edge / faux blur in pixels
+    private float softness;
     private float rippleX;
     private float rippleY;
     private double rippleStartedAt = Double.NEGATIVE_INFINITY;
@@ -74,7 +74,6 @@ public final class Box {
         return this;
     }
 
-    /** Stroke width in pixels (drawn inside the box edge). */
     public Box border(float width, Rgba color) {
         this.borderWidth = Math.max(0f, width);
         if (color != null) {
@@ -95,10 +94,6 @@ public final class Box {
         return this;
     }
 
-    /**
-     * Soft outer falloff in pixels. Higher values give a frosted / blurred edge
-     * suitable for glassmorphism-style panels (approximate, not a true background blur).
-     */
     public Box softness(float pixels) {
         this.softness = Math.max(0f, pixels);
         return this;

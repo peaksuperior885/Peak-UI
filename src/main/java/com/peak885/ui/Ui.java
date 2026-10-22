@@ -83,6 +83,7 @@ public final class Ui implements AutoCloseable {
     private final Deque<int[]> clips = new ArrayDeque<>();
     private final Map<String, Box> boxes = new HashMap<>();
     private final Map<String, Float> anims = new HashMap<>();
+    private final Map<String, Boolean> dropdowns = new HashMap<>();
 
     public int width;
     public int height;
@@ -100,6 +101,8 @@ public final class Ui implements AutoCloseable {
 
     private double lastTime = -1;
     private String pressedId;
+    /** Currently focused text field id, or null. */
+    private String focusedId;
     private int cursorKind;
     private int layer;
     private int maxLayer;
@@ -153,6 +156,19 @@ public final class Ui implements AutoCloseable {
         escapePressed = false;
         typed.setLength(0);
         backspaces = 0;
+    }
+
+    /** Currently focused text-field id, or {@code null}. */
+    public String focusedId() {
+        return focusedId;
+    }
+
+    public void clearFocus() {
+        focusedId = null;
+    }
+
+    public boolean isFocused(String id) {
+        return id != null && id.equals(focusedId);
     }
 
     public int cursorKind() {
@@ -435,6 +451,751 @@ public final class Ui implements AutoCloseable {
                 .border(selected ? 0f : 1f, border);
         boxCmds.add(new BoxCmd(box, clips.peek(), layer));
         return in;
+    }
+
+    /**
+     * Result of a {@link #tabs} call: the (possibly updated) selected index and whether
+     * the user just changed it this frame.
+     */
+    public static final class TabsResult {
+        public int selected;
+        public boolean changed;
+        /** Pixel X of the left edge of the selected tab (for custom indicator drawing). */
+        public float indicatorX;
+        /** Pixel width of the selected tab. */
+        public float indicatorW;
+    }
+
+    /**
+     * Material / Compose {@code TabRow}-style horizontal tabs.
+     * <p>
+     * Draws equal-width tabs with labels, a primary-color underline indicator that
+     * animates between selections, and a subtle bottom divider. Returns the active
+     * index (clamped) and whether it changed this frame.
+     * <p>
+     * Call once per frame; keep {@code selected} in your own state and feed it back:
+     * <pre>{@code
+     * int tab = 0;
+     * // each frame:
+     * Ui.TabsResult r = ui.tabs("main-tabs", 32, 120, 400, 40,
+     *         new String[]{"Home", "Profile", "Settings"}, tab);
+     * tab = r.selected;
+     * if (r.changed) { /* switch content *\/ }
+     * }</pre>
+     *
+     * @param id       stable interaction / animation id prefix
+     * @param x        left of the tab row
+     * @param y        top of the tab row
+     * @param width    total width of the row (tabs share it equally)
+     * @param height   tab height in pixels
+     * @param labels   tab titles (must be non-null, length ≥ 1)
+     * @param selected currently selected index (will be clamped)
+     */
+    public TabsResult tabs(String id, float x, float y, float width, float height,
+                           String[] labels, int selected) {
+        return tabs(id, x, y, width, height, labels, selected,
+                Theme.PRIMARY, Theme.ON_SURFACE, Theme.ON_SURFACE_VARIANT);
+    }
+
+    /**
+     * Tabs with explicit colors for indicator, selected label, and unselected label.
+     */
+    public TabsResult tabs(String id, float x, float y, float width, float height,
+                           String[] labels, int selected,
+                           Rgba indicatorColor, Rgba selectedLabel, Rgba unselectedLabel) {
+        TabsResult result = new TabsResult();
+        if (labels == null || labels.length == 0) {
+            result.selected = 0;
+            return result;
+        }
+        int n = labels.length;
+        int sel = Math.floorMod(selected, n);
+        float tabW = width / n;
+        float indicatorH = 3f;
+
+        // Bottom hairline
+        rect(x, y + height - 1f, width, 1f, Theme.OUTLINE_VARIANT.alpha(0.45f), 0f);
+
+        int clicked = -1;
+        for (int i = 0; i < n; i++) {
+            float tx = x + i * tabW;
+            String tabId = id + "#tab" + i;
+            Interaction in = interact(tabId, tx, y, tabW, height);
+            float hover = anim(tabId + "#hover", in.hovered ? 1f : 0f, 22f);
+
+            // Subtle hover wash
+            if (hover > 0.01f || in.pressed) {
+                float amount = 0.08f * hover + (in.pressed ? 0.05f : 0f);
+                rect(tx, y, tabW, height, Theme.ON_SURFACE.alpha(amount), 0f);
+            }
+
+            boolean isSel = (i == sel);
+            Rgba labelColor = isSel
+                    ? selectedLabel
+                    : unselectedLabel.mix(selectedLabel, hover * 0.35f);
+            textCentered(Font.BODY, labels[i], tx + tabW * 0.5f, y + height * 0.5f, labelColor);
+
+            if (in.clicked) {
+                clicked = i;
+            }
+        }
+
+        if (clicked >= 0 && clicked != sel) {
+            sel = clicked;
+            result.changed = true;
+        }
+        result.selected = sel;
+
+        // Animated indicator position / width (smooth slide)
+        float targetX = x + sel * tabW;
+        float targetW = tabW;
+        float indX = anim(id + "#indX", targetX, 18f);
+        float indW = anim(id + "#indW", targetW, 18f);
+        // Slightly inset indicator for a cleaner look
+        float inset = Math.min(12f, tabW * 0.12f);
+        rect(indX + inset, y + height - indicatorH, Math.max(0f, indW - 2f * inset), indicatorH,
+                indicatorColor, indicatorH * 0.5f);
+
+        result.indicatorX = indX;
+        result.indicatorW = indW;
+        return result;
+    }
+
+    /** Result of a Compose-style exposed dropdown menu. */
+    public static final class DropdownResult {
+        public int selected;
+        public boolean changed;
+        public boolean expanded;
+    }
+
+    /** Exposed dropdown field with an anchored Material-style menu. */
+    public DropdownResult dropdown(String id, float x, float y, float w, float h,
+                                   String[] options, int selected) {
+        DropdownResult result = new DropdownResult();
+        if (options == null || options.length == 0) {
+            result.selected = 0;
+            return result;
+        }
+        int sel = Math.max(0, Math.min(selected, options.length - 1));
+        boolean expanded = dropdowns.getOrDefault(id, false);
+        Interaction anchor = interact(id + "#anchor", x, y, w, h);
+        if (anchor.clicked) expanded = !expanded;
+        if (escapePressed && expanded) expanded = false;
+
+        float menuY = y + h + 4f;
+        float rowH = Math.max(40f, h);
+        float menuH = rowH * options.length;
+        if (menuY + menuH > height && y >= menuH + 4f) menuY = y - menuH - 4f;
+        if (expanded && mousePressed && !hit(x, y, w, h)
+                && !hit(x, menuY, w, menuH)) expanded = false;
+
+        surface(id + "#anchor", x, y, w, h, 10f,
+                Theme.SURFACE_CONTAINER_HIGH, Theme.ON_SURFACE);
+        rect(x, y, w, h, Theme.SURFACE_CONTAINER_HIGH, 10f,
+                1f, expanded ? Theme.PRIMARY : Theme.OUTLINE, 0f);
+        textLeft(Font.BODY, fit(Font.BODY, options[sel], Math.max(0, (int) w - 48)),
+                x + 14, y + h * 0.5f, Theme.ON_SURFACE);
+        float cx = x + w - 20;
+        float cy = y + h * 0.5f;
+        textCentered(Font.BODY, expanded ? "⌃" : "⌄", cx, cy, Theme.ON_SURFACE_VARIANT);
+
+        if (expanded) {
+            setLayer(layer + 1);
+            elevatedShadow(x, menuY, w, menuH, 8f, 4f);
+            rect(x, menuY, w, menuH, Theme.SURFACE_CONTAINER, 8f,
+                    1f, Theme.OUTLINE_VARIANT.alpha(0.65f), 0f);
+            for (int i = 0; i < options.length; i++) {
+                float oy = menuY + i * rowH;
+                Interaction option = interact(id + "#option" + i, x + 4, oy + 2, w - 8, rowH - 4);
+                if (i == sel) rect(x + 4, oy + 2, w - 8, rowH - 4, Theme.SECONDARY_CONTAINER, 6f);
+                else if (option.hovered) rect(x + 4, oy + 2, w - 8, rowH - 4,
+                        Theme.ON_SURFACE.alpha(0.08f), 6f);
+                textLeft(Font.BODY, fit(Font.BODY, options[i], Math.max(0, (int) w - 32)),
+                        x + 16, oy + rowH * 0.5f,
+                        i == sel ? Theme.ON_SECONDARY_CONTAINER : Theme.ON_SURFACE);
+                if (option.clicked) {
+                    sel = i;
+                    result.changed = sel != selected;
+                    expanded = false;
+                }
+            }
+            setLayer(layer - 1);
+        }
+        dropdowns.put(id, expanded);
+        result.selected = sel;
+        result.expanded = expanded;
+        return result;
+    }
+
+    /**
+     * Scrollable / content-sized tab row: each tab is only as wide as its label (+ padding).
+     * Tabs that would overflow {@code maxWidth} are still drawn; clip externally if needed.
+     *
+     * @return same {@link TabsResult} contract as {@link #tabs}
+     */
+    public TabsResult tabsAuto(String id, float x, float y, float maxWidth, float height,
+                               String[] labels, int selected) {
+        TabsResult result = new TabsResult();
+        if (labels == null || labels.length == 0) {
+            result.selected = 0;
+            return result;
+        }
+        int n = labels.length;
+        int sel = Math.floorMod(selected, n);
+        float hPad = 16f;
+        float gap = 4f;
+
+        float[] widths = new float[n];
+        float total = 0f;
+        for (int i = 0; i < n; i++) {
+            widths[i] = textWidth(Font.BODY, labels[i]) + 2f * hPad;
+            total += widths[i];
+            if (i > 0) total += gap;
+        }
+        // If under maxWidth, we can center or left-align; left-align for simplicity
+        float rowW = Math.min(maxWidth, total);
+
+        rect(x, y + height - 1f, rowW, 1f, Theme.OUTLINE_VARIANT.alpha(0.45f), 0f);
+
+        float cursor = x;
+        float[] lefts = new float[n];
+        int clicked = -1;
+        for (int i = 0; i < n; i++) {
+            lefts[i] = cursor;
+            float tw = widths[i];
+            String tabId = id + "#tab" + i;
+            Interaction in = interact(tabId, cursor, y, tw, height);
+            float hover = anim(tabId + "#hover", in.hovered ? 1f : 0f, 22f);
+            if (hover > 0.01f || in.pressed) {
+                float amount = 0.08f * hover + (in.pressed ? 0.05f : 0f);
+                rect(cursor, y, tw, height, Theme.ON_SURFACE.alpha(amount), 8f);
+            }
+            boolean isSel = (i == sel);
+            Rgba labelColor = isSel
+                    ? Theme.PRIMARY
+                    : Theme.ON_SURFACE_VARIANT.mix(Theme.PRIMARY, hover * 0.35f);
+            textCentered(Font.BODY, labels[i], cursor + tw * 0.5f, y + height * 0.5f, labelColor);
+            if (in.clicked) {
+                clicked = i;
+            }
+            cursor += tw + gap;
+        }
+
+        if (clicked >= 0 && clicked != sel) {
+            sel = clicked;
+            result.changed = true;
+        }
+        result.selected = sel;
+
+        float targetX = lefts[sel];
+        float targetW = widths[sel];
+        float indX = anim(id + "#indX", targetX, 18f);
+        float indW = anim(id + "#indW", targetW, 18f);
+        float inset = 6f;
+        rect(indX + inset, y + height - 3f, Math.max(0f, indW - 2f * inset), 3f,
+                Theme.PRIMARY, 1.5f);
+
+        result.indicatorX = indX;
+        result.indicatorW = indW;
+        return result;
+    }
+
+    // -------------------------------------------------------------------------
+    // Text fields, toggles, progress, and other Compose-inspired controls
+    // -------------------------------------------------------------------------
+
+    /**
+     * Mutable text-field state returned by {@link #textField} / {@link #searchField}.
+     * Keep the string in your own state and pass it back each frame (immediate mode).
+     */
+    public static final class TextFieldResult {
+        public String text;
+        public boolean focused;
+        public boolean changed;
+        public boolean submitted;
+        public Interaction interaction = new Interaction();
+    }
+
+    /**
+     * Material-style filled text field. Handles click-to-focus, character input via
+     * {@link #typed}, backspace via {@link #backspaces}, and Escape to blur.
+     * <p>
+     * Pass the current value each frame; apply {@code result.text} back into your state.
+     *
+     * @param placeholder shown when {@code value} is empty and unfocused
+     * @param maxLength   hard cap on characters (0 = unlimited)
+     */
+    public TextFieldResult textField(String id, float x, float y, float w, float h,
+                                     String value, String placeholder, int maxLength) {
+        return textFieldInternal(id, x, y, w, h, value, placeholder, maxLength, false);
+    }
+
+    /**
+     * Search-oriented field: rounded pill, leading magnifier glyph, and a clear (×)
+     * affordance when non-empty. Same text-input contract as {@link #textField}.
+     */
+    public TextFieldResult searchField(String id, float x, float y, float w, float h,
+                                       String value, String placeholder) {
+        return textFieldInternal(id, x, y, w, h, value != null ? value : "",
+                placeholder != null ? placeholder : "Search", 0, true);
+    }
+
+    private TextFieldResult textFieldInternal(String id, float x, float y, float w, float h,
+                                              String value, String placeholder, int maxLength,
+                                              boolean searchStyle) {
+        TextFieldResult r = new TextFieldResult();
+        String text = value != null ? value : "";
+        r.text = text;
+
+        float radius = searchStyle ? h * 0.5f : 8f;
+        float padL = searchStyle ? h * 0.55f + 8f : 14f;
+        float padR = searchStyle ? (text.isEmpty() ? 14f : h * 0.55f + 8f) : 14f;
+
+        Interaction in = interact(id, x, y, w, h);
+        r.interaction = in;
+        if (in.hovered) {
+            requestCursor(CURSOR_IBEAM);
+        }
+
+        // Focus management: click focuses; click outside blurs; Escape blurs
+        if (in.clicked) {
+            focusedId = id;
+        } else if (mousePressed && !in.hovered && id.equals(focusedId)) {
+            focusedId = null;
+        }
+        if (escapePressed && id.equals(focusedId)) {
+            focusedId = null;
+        }
+        boolean focused = id.equals(focusedId);
+        r.focused = focused;
+
+        // Consume keyboard input only when focused
+        if (focused) {
+            if (backspaces > 0 && !text.isEmpty()) {
+                int n = Math.min(backspaces, text.length());
+                text = text.substring(0, text.length() - n);
+                r.changed = true;
+            }
+            if (typed.length() > 0) {
+                StringBuilder sb = new StringBuilder(text);
+                for (int i = 0; i < typed.length(); i++) {
+                    char c = typed.charAt(i);
+                    if (c == '\n' || c == '\r') {
+                        r.submitted = true;
+                        continue;
+                    }
+                    if (c >= 32) {
+                        if (maxLength <= 0 || sb.length() < maxLength) {
+                            sb.append(c);
+                            r.changed = true;
+                        }
+                    }
+                }
+                text = sb.toString();
+            }
+            r.text = text;
+        }
+
+        float focusAmt = anim(id + "#focus", focused ? 1f : 0f, 22f);
+        float hover = anim(id + "#hover", in.hovered ? 1f : 0f, 20f);
+
+        Rgba fill = Theme.SURFACE_CONTAINER_HIGHEST.mix(Theme.SURFACE_CONTAINER_HIGH, hover * 0.3f);
+        Rgba border = Theme.OUTLINE_VARIANT.mix(Theme.PRIMARY, focusAmt);
+        float borderW = 1f + focusAmt * 0.75f;
+
+        Box box = boxFor(id);
+        box.bounds(x, y, Math.max(0f, w), Math.max(0f, h))
+                .cornerRadius(radius)
+                .color(fill)
+                .border(borderW, border)
+                .softness(0f);
+        boxCmds.add(new BoxCmd(box, clips.peek(), layer));
+
+        // Search icon (simple geometric magnifier)
+        if (searchStyle) {
+            float cx = x + h * 0.38f;
+            float cy = y + h * 0.5f;
+            float rIcon = h * 0.14f;
+            rect(cx - rIcon, cy - rIcon, rIcon * 2f, rIcon * 2f,
+                    Theme.ON_SURFACE_VARIANT.alpha(0.55f), rIcon,
+                    1.5f, Theme.ON_SURFACE_VARIANT.alpha(0.75f), 0f);
+            // handle
+            float hx = cx + rIcon * 0.55f;
+            float hy = cy + rIcon * 0.55f;
+            rect(hx, hy, h * 0.12f, 1.6f, Theme.ON_SURFACE_VARIANT.alpha(0.75f), 1f);
+        }
+
+        // Clear button for search
+        if (searchStyle && !text.isEmpty()) {
+            float clearSize = h * 0.45f;
+            float cx = x + w - h * 0.5f;
+            float cy = y + h * 0.5f;
+            Interaction clear = interact(id + "#clear", cx - clearSize * 0.5f, cy - clearSize * 0.5f,
+                    clearSize, clearSize);
+            if (clear.hovered) {
+                requestCursor(CURSOR_HAND);
+            }
+            rect(cx - clearSize * 0.35f, cy - clearSize * 0.35f, clearSize * 0.7f, clearSize * 0.7f,
+                    Theme.ON_SURFACE_VARIANT.alpha(clear.hovered ? 0.25f : 0.12f), clearSize * 0.35f);
+            textCentered(Font.LABEL, "×", cx, cy, Theme.ON_SURFACE_VARIANT);
+            if (clear.clicked) {
+                text = "";
+                r.text = text;
+                r.changed = true;
+                focusedId = id;
+            }
+        }
+
+        // Text / placeholder
+        float textX = x + padL;
+        float textMaxW = w - padL - padR;
+        pushClip(textX, y, textMaxW, h);
+        if (text.isEmpty() && !focused) {
+            String ph = placeholder != null ? placeholder : "";
+            textLeft(Font.BODY, fit(Font.BODY, ph, (int) textMaxW), textX, y + h * 0.5f,
+                    Theme.ON_SURFACE_VARIANT.alpha(0.65f));
+        } else {
+            String display = fit(Font.BODY, text, (int) textMaxW);
+            // If overflowing, prefer showing the end of the string (caret at end)
+            if (textWidth(Font.BODY, text) > textMaxW) {
+                // simple right-align by measuring tail
+                display = text;
+                while (display.length() > 1 && textWidth(Font.BODY, display) > textMaxW) {
+                    display = display.substring(1);
+                }
+            }
+            textLeft(Font.BODY, display, textX, y + h * 0.5f, Theme.ON_SURFACE);
+
+            // Blinking caret when focused
+            if (focused) {
+                float caretOn = ((int) (time * 2.0) % 2 == 0) ? 1f : 0f;
+                if (caretOn > 0f) {
+                    float cw = textWidth(Font.BODY, display);
+                    rect(textX + cw + 1f, y + h * 0.25f, 1.5f, h * 0.5f, Theme.PRIMARY, 0f);
+                }
+            }
+        }
+        popClip();
+
+        return r;
+    }
+
+    /**
+     * Compose {@code Switch} / Material switch. Returns the new on/off state
+     * (toggles on click). Thumb animates between positions.
+     */
+    public boolean toggle(String id, float x, float y, float height, boolean on) {
+        float h = Math.max(20f, height);
+        float w = h * 1.7f;
+        Interaction in = interact(id, x, y, w, h);
+        if (in.clicked) {
+            on = !on;
+        }
+        float t = anim(id + "#on", on ? 1f : 0f, 18f);
+        float hover = anim(id + "#hover", in.hovered ? 1f : 0f, 20f);
+
+        Rgba trackOff = Theme.SURFACE_CONTAINER_HIGHEST.mix(Theme.OUTLINE, 0.35f);
+        Rgba trackOn = Theme.PRIMARY;
+        Rgba track = trackOff.mix(trackOn, t);
+        float trackR = h * 0.5f;
+        rect(x, y, w, h, track.mix(Theme.ON_SURFACE, hover * 0.06f), trackR);
+
+        float thumbPad = h * 0.12f;
+        float thumbD = h - 2f * thumbPad;
+        float thumbX = x + thumbPad + t * (w - thumbD - 2f * thumbPad);
+        float thumbY = y + thumbPad;
+        // Soft shadow under thumb
+        rect(thumbX + 1f, thumbY + 1.5f, thumbD, thumbD, new Rgba(0f, 0f, 0f, 0.18f), thumbD * 0.5f);
+        rect(thumbX, thumbY, thumbD, thumbD, Theme.ON_PRIMARY.mix(Theme.ON_SURFACE, 1f - t * 0.15f), thumbD * 0.5f);
+        return on;
+    }
+
+    /**
+     * Checkbox with animated check. Returns the new checked state.
+     */
+    public boolean checkbox(String id, float x, float y, float size, boolean checked) {
+        float s = Math.max(14f, size);
+        Interaction in = interact(id, x, y, s, s);
+        if (in.clicked) {
+            checked = !checked;
+        }
+        float t = anim(id + "#chk", checked ? 1f : 0f, 20f);
+        float hover = anim(id + "#hover", in.hovered ? 1f : 0f, 20f);
+
+        Rgba fill = Theme.SURFACE_CONTAINER_HIGH.mix(Theme.PRIMARY, t);
+        Rgba border = Theme.OUTLINE.mix(Theme.PRIMARY, Math.max(t, hover * 0.5f));
+        rect(x, y, s, s, fill, 4f, 1.5f, border, 0f);
+
+        if (t > 0.05f) {
+            // Simple checkmark via two thin rects
+            float a = Math.min(1f, t * 1.4f);
+            Rgba mark = Theme.ON_PRIMARY.alpha(a);
+            float cx = x + s * 0.28f;
+            float cy = y + s * 0.55f;
+            // short leg
+            rect(cx, cy, s * 0.18f, 2f, mark, 1f);
+            // long leg
+            rect(cx + s * 0.12f, cy - s * 0.22f, 2f, s * 0.38f, mark, 1f);
+        }
+        return checked;
+    }
+
+    /**
+     * Linear progress bar (determinate). {@code progress} is clamped to {@code [0, 1]}.
+     */
+    public void progressBar(float x, float y, float w, float h, float progress) {
+        progressBar(x, y, w, h, progress, Theme.SURFACE_CONTAINER_HIGH, Theme.PRIMARY);
+    }
+
+    public void progressBar(float x, float y, float w, float h, float progress, Rgba track, Rgba fill) {
+        float p = Math.max(0f, Math.min(1f, progress));
+        float r = h * 0.5f;
+        rect(x, y, w, h, track, r);
+        if (p > 0.001f) {
+            rect(x, y, Math.max(h, w * p), h, fill, r);
+        }
+    }
+
+    /**
+     * Indeterminate progress bar — a sliding highlight that loops using {@link #time}.
+     */
+    public void progressIndeterminate(String id, float x, float y, float w, float h) {
+        float r = h * 0.5f;
+        rect(x, y, w, h, Theme.SURFACE_CONTAINER_HIGH, r);
+        float cycle = (float) ((time * 0.85) % 1.6);
+        float head = cycle < 1f ? cycle : 1f;
+        float tail = cycle < 0.6f ? 0f : (cycle - 0.6f) / 1f;
+        float left = x + w * tail;
+        float right = x + w * Math.min(1f, head * 0.55f + tail);
+        float bw = Math.max(h, right - left);
+        // Keep a stable anim key so callers can have multiple bars
+        anim(id + "#ind", head, 1f);
+        pushClip(x, y, w, h);
+        rect(left, y, bw, h, Theme.PRIMARY, r);
+        popClip();
+    }
+
+    /**
+     * Horizontal slider. Returns the new value in {@code [min, max]}.
+     * Drag while pressed; value updates continuously.
+     */
+    public float slider(String id, float x, float y, float w, float h, float value, float min, float max) {
+        if (max <= min) {
+            max = min + 1f;
+        }
+        float trackH = Math.max(4f, h * 0.22f);
+        float thumbR = Math.max(8f, h * 0.42f);
+        float trackY = y + (h - trackH) * 0.5f;
+
+        Interaction in = interact(id, x - thumbR, y, w + 2f * thumbR, h);
+        float t = (value - min) / (max - min);
+        t = Math.max(0f, Math.min(1f, t));
+
+        if (in.pressed || (in.hovered && mouseDown && id.equals(pressedId))) {
+            float nx = (mouseX - x) / w;
+            t = Math.max(0f, Math.min(1f, nx));
+            value = min + t * (max - min);
+        }
+
+        float animT = anim(id + "#t", t, 28f);
+        // Prefer live value while dragging
+        float drawT = (in.pressed) ? t : animT;
+
+        rect(x, trackY, w, trackH, Theme.SURFACE_CONTAINER_HIGHEST, trackH * 0.5f);
+        float filledW = w * drawT;
+        if (filledW > 0.5f) {
+            rect(x, trackY, filledW, trackH, Theme.PRIMARY, trackH * 0.5f);
+        }
+
+        float tx = x + w * drawT;
+        float ty = y + h * 0.5f;
+        float hover = anim(id + "#hover", in.hovered || in.pressed ? 1f : 0f, 20f);
+        // Outer ring on hover
+        if (hover > 0.01f) {
+            float ring = thumbR + 4f * hover;
+            rect(tx - ring, ty - ring, ring * 2f, ring * 2f, Theme.PRIMARY.alpha(0.12f * hover), ring);
+        }
+        rect(tx - thumbR + 1f, ty - thumbR + 1.5f, thumbR * 2f, thumbR * 2f,
+                new Rgba(0f, 0f, 0f, 0.2f), thumbR);
+        rect(tx - thumbR, ty - thumbR, thumbR * 2f, thumbR * 2f, Theme.PRIMARY, thumbR);
+        return value;
+    }
+
+    /**
+     * Floating action button (circular). Primary colored with elevation.
+     */
+    public Interaction fab(String id, float x, float y, float size) {
+        float s = Math.max(40f, size);
+        elevatedShadow(x, y, s, s, s * 0.5f, 8f);
+        Interaction in = surface(id, x, y, s, s, s * 0.5f, Theme.PRIMARY_CONTAINER, Theme.ON_SURFACE);
+        return in;
+    }
+
+    /**
+     * Small circular icon-style button (no label — draw your glyph with {@link #textCentered}).
+     */
+    public Interaction iconButton(String id, float x, float y, float size) {
+        float s = Math.max(28f, size);
+        Interaction in = interact(id, x, y, s, s);
+        float hover = anim(id + "#hover", in.hovered ? 1f : 0f, 22f);
+        if (hover > 0.01f || in.pressed) {
+            float amount = 0.10f * hover + (in.pressed ? 0.06f : 0f);
+            Box box = boxFor(id);
+            if (in.hovered && mousePressed) {
+                box.press(mouseX - x, mouseY - y, time);
+            }
+            box.bounds(x, y, s, s)
+                    .cornerRadius(s * 0.5f)
+                    .color(Theme.ON_SURFACE.alpha(amount));
+            boxCmds.add(new BoxCmd(box, clips.peek(), layer));
+        }
+        return in;
+    }
+
+    /**
+     * Segmented button row (Compose {@code SingleChoiceSegmentedButtonRow}).
+     * Returns the selected index (clamped). Equal-width segments.
+     */
+    public int segmented(String id, float x, float y, float w, float h, String[] labels, int selected) {
+        if (labels == null || labels.length == 0) {
+            return 0;
+        }
+        int n = labels.length;
+        int sel = Math.floorMod(selected, n);
+        float segW = w / n;
+        float radius = h * 0.5f;
+
+        // Outer outline
+        rect(x, y, w, h, Theme.SURFACE_CONTAINER_HIGH, radius, 1.25f, Theme.OUTLINE_VARIANT, 0f);
+
+        for (int i = 0; i < n; i++) {
+            float sx = x + i * segW;
+            String segId = id + "#seg" + i;
+            Interaction in = interact(segId, sx, y, segW, h);
+            if (in.clicked) {
+                sel = i;
+            }
+            boolean isSel = (i == sel);
+            float hover = anim(segId + "#hover", in.hovered ? 1f : 0f, 20f);
+
+            if (isSel) {
+                // Selected pill inset slightly
+                float inset = 3f;
+                rect(sx + inset, y + inset, segW - 2f * inset, h - 2f * inset,
+                        Theme.SECONDARY_CONTAINER, radius - inset);
+            } else if (hover > 0.01f) {
+                rect(sx + 2f, y + 2f, segW - 4f, h - 4f,
+                        Theme.ON_SURFACE.alpha(0.06f * hover), radius - 2f);
+            }
+
+            Rgba labelC = isSel ? Theme.ON_SECONDARY_CONTAINER : Theme.ON_SURFACE_VARIANT;
+            textCentered(Font.LABEL, labels[i], sx + segW * 0.5f, y + h * 0.5f, labelC);
+
+            // Divider between segments (except last)
+            if (i < n - 1 && !isSel && sel != i + 1) {
+                rect(sx + segW - 0.5f, y + h * 0.25f, 1f, h * 0.5f,
+                        Theme.OUTLINE_VARIANT.alpha(0.5f), 0f);
+            }
+        }
+        return sel;
+    }
+
+    /**
+     * List item row: optional leading accent, title, supporting text, and click target.
+     * Height is derived from content (~56–72).
+     */
+    public Interaction listItem(String id, float x, float y, float w, float h,
+                                String title, String supporting) {
+        Interaction in = interact(id, x, y, w, h);
+        float hover = anim(id + "#hover", in.hovered ? 1f : 0f, 20f);
+        if (hover > 0.01f || in.pressed) {
+            float amount = 0.07f * hover + (in.pressed ? 0.04f : 0f);
+            rect(x, y, w, h, Theme.ON_SURFACE.alpha(amount), 8f);
+        }
+        float textX = x + 16f;
+        if (title != null) {
+            float ty = supporting != null && !supporting.isEmpty()
+                    ? y + h * 0.38f
+                    : y + h * 0.5f;
+            textLeft(Font.BODY, fit(Font.BODY, title, (int) (w - 32f)), textX, ty, Theme.ON_SURFACE);
+        }
+        if (supporting != null && !supporting.isEmpty()) {
+            textLeft(Font.LABEL, fit(Font.LABEL, supporting, (int) (w - 32f)),
+                    textX, y + h * 0.68f, Theme.ON_SURFACE_VARIANT);
+        }
+        return in;
+    }
+
+    /**
+     * Notification-style badge (count or dot) drawn at the top-right of a region.
+     * Pass {@code count < 0} for a plain dot.
+     */
+    public void badge(float anchorRight, float anchorTop, int count) {
+        if (count == 0) {
+            return;
+        }
+        if (count < 0) {
+            float d = 10f;
+            rect(anchorRight - d * 0.5f, anchorTop - d * 0.5f, d, d, Theme.PRIMARY, d * 0.5f);
+            return;
+        }
+        String label = count > 99 ? "99+" : Integer.toString(count);
+        float tw = textWidth(Font.LABEL, label);
+        float bw = Math.max(18f, tw + 10f);
+        float bh = 18f;
+        rect(anchorRight - bw * 0.5f, anchorTop - bh * 0.5f, bw, bh, Theme.PRIMARY, bh * 0.5f);
+        textCentered(Font.LABEL, label, anchorRight, anchorTop, Theme.ON_PRIMARY);
+    }
+
+    /**
+     * Vertical linear gradient-like accent bar (custom Peak UI accent rail).
+     * Useful beside list panels or as a section marker.
+     */
+    public void accentRail(float x, float y, float h, float thickness, Rgba color) {
+        float t = Math.max(2f, thickness);
+        rect(x, y, t, h, color, t * 0.5f);
+        rect(x + t * 0.15f, y, t * 0.7f, h, color.alpha(color.a * 0.35f), t * 0.35f, 0f, null, t);
+    }
+
+    /**
+     * Soft glow orb — decorative ambient blob (custom Peak UI flair).
+     */
+    public void glowOrb(float cx, float cy, float radius, Rgba color) {
+        float r = Math.max(8f, radius);
+        rect(cx - r, cy - r, r * 2f, r * 2f, color, r, 0f, null, r * 0.65f);
+    }
+
+    /**
+     * Pill-shaped status chip with a colored dot (custom: online / offline / busy).
+     */
+    public void statusPill(float x, float y, float h, String label, Rgba statusColor) {
+        if (label == null) label = "";
+        float pad = 10f;
+        float dot = h * 0.28f;
+        float tw = textWidth(Font.LABEL, label);
+        float w = pad + dot + 6f + tw + pad;
+        rect(x, y, w, h, Theme.SURFACE_CONTAINER_HIGH, h * 0.5f, 1f, Theme.OUTLINE_VARIANT.alpha(0.5f), 0f);
+        float dy = y + (h - dot) * 0.5f;
+        rect(x + pad, dy, dot, dot, statusColor, dot * 0.5f);
+        textLeft(Font.LABEL, label, x + pad + dot + 6f, y + h * 0.5f, Theme.ON_SURFACE);
+    }
+
+    /**
+     * Simple tooltip bubble near a point. Draw on a high {@link #setLayer} so it sits on top.
+     * Call only when you want it visible (e.g. after a hover delay in your code).
+     */
+    public void tooltip(float x, float y, String message) {
+        if (message == null || message.isEmpty()) {
+            return;
+        }
+        float padX = 10f;
+        float padY = 6f;
+        float tw = textWidth(Font.LABEL, message);
+        float bw = tw + padX * 2f;
+        float bh = Font.LABEL.size + padY * 2f;
+        elevatedShadow(x, y, bw, bh, 6f, 3f);
+        rect(x, y, bw, bh, Theme.INVERSE_SURFACE, 6f);
+        textLeft(Font.LABEL, message, x + padX, y + bh * 0.5f, Theme.INVERSE_ON_SURFACE);
     }
 
     public void text(Font font, String s, float x, float baseline, Rgba c) {
